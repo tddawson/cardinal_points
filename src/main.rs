@@ -1,9 +1,8 @@
-use std::{f32::consts::PI, thread::spawn};
+use std::{f32::consts::PI};
 
 use ::bevy::prelude::*;
 use bevy::{
-    a11y::accesskit::Point,
-    sprite::{Anchor, MaterialMesh2dBundle},
+    sprite::{Anchor},
 };
 use rand::Rng;
 
@@ -49,29 +48,42 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
     commands.spawn(Camera2dBundle::default());
 
-    commands.spawn(MaterialMesh2dBundle {
-        mesh: meshes.add(shape::Circle::new(50.).into()).into(),
-        material: materials.add(ColorMaterial::from(Color::rgb(1., 1., 1.))),
+    commands.spawn(SpriteBundle {
+        texture: asset_server.load("images/cardinal.png"),
+        transform: Transform {
+            scale: Vec3::new(0.15, 0.15, 1.),
+            ..default()
+        },
         ..default()
     });
 
+    let tex = asset_server.load("images/wing.png");
+    commands.spawn(WingBundle::new(
+        WingPosition::Left,
+        WingDirection::Clockwise,
+        tex.clone(),
+    ));
+    commands.spawn(WingBundle::new(
+        WingPosition::Right,
+        WingDirection::CounterClockwise,
+        tex.clone(),
+    ));
+
+    
+
     commands.spawn(
-        TextBundle::from_sections([
-            TextSection::new(
-                "0",
-                TextStyle {
-                    font: asset_server.load("fonts/Roboto-Black.ttf"),
-                    font_size: 60.,
-                    color: Color::rgb(0.5, 0., 0.),
-                },
-            ),
-        ])
+        TextBundle::from_sections([TextSection::new(
+            "0",
+            TextStyle {
+                font: asset_server.load("fonts/Roboto-Black.ttf"),
+                font_size: 60.,
+                color: Color::rgb(0.5, 0., 0.),
+            },
+        )])
         .with_style(Style {
             position_type: PositionType::Absolute,
             position: UiRect {
@@ -82,6 +94,11 @@ fn setup(
             ..default()
         }),
     );
+
+    commands.spawn(WingTimer(Timer::from_seconds(
+        0.75,
+        TimerMode::Once,
+    )));
 }
 
 #[derive(Resource)]
@@ -96,10 +113,15 @@ struct WaveEndEvent;
 #[derive(Component)]
 struct Obj;
 
+#[derive(Component, Deref, DerefMut)]
+struct WingTimer(Timer);
+
 #[derive(Component)]
 struct Wing {
     direction: WingDirection,
     position: WingPosition,
+    base_z_rotation: f32,
+    is_moving: bool,
 }
 
 #[derive(Bundle)]
@@ -109,17 +131,19 @@ struct WingBundle {
 }
 
 impl WingBundle {
-    fn new(position: WingPosition, direction: WingDirection) -> WingBundle {
+    fn new(position: WingPosition, direction: WingDirection, texture: Handle<Image>) -> WingBundle {
         WingBundle {
             sprite_bundle: SpriteBundle {
                 sprite: Sprite {
                     color: Color::rgb(1., 1., 1.),
                     anchor: position.anchor(),
+                    flip_x: if position == WingPosition::Left { true } else { false },
                     ..default()
                 },
+                texture: texture,
                 transform: Transform {
                     translation: Vec3::new(0., 0., 0.),
-                    scale: position.size(),
+                    scale: Vec3::new(0.25, 0.25, 0.),
                     ..default()
                 },
                 ..default()
@@ -127,6 +151,8 @@ impl WingBundle {
             wing: Wing {
                 direction: direction,
                 position: position,
+                base_z_rotation: 0.,
+                is_moving: false,
             },
         }
     }
@@ -140,35 +166,22 @@ enum WingDirection {
 
 #[derive(PartialEq)]
 enum WingPosition {
-    Top,
     Right,
-    Bottom,
     Left,
 }
 
 impl WingPosition {
     fn anchor(&self) -> Anchor {
         match self {
-            WingPosition::Top => Anchor::BottomCenter,
             WingPosition::Right => Anchor::CenterLeft,
-            WingPosition::Bottom => Anchor::TopCenter,
             WingPosition::Left => Anchor::CenterRight,
-        }
-    }
-
-    fn size(&self) -> Vec3 {
-        match self {
-            WingPosition::Top | WingPosition::Bottom => Vec3::new(20., (Y_MAX - Y_MIN) / 2., 0.),
-            WingPosition::Right | WingPosition::Left => Vec3::new((X_MAX - X_MIN) / 2., 20., 0.),
         }
     }
 
     fn adjusted_angle(&self, original: f32) -> f32 {
         let a = original
             + match self {
-                WingPosition::Top => PI / 2.,
                 WingPosition::Right => 0.,
-                WingPosition::Bottom => 3. * PI / 2.,
                 WingPosition::Left => PI,
             };
         let a = a + 2. * PI;
@@ -198,65 +211,70 @@ fn spawn_objects(mut commands: Commands) {
     }
 }
 
-fn handle_direction_pressed(mut commands: Commands, keyboard_input: Res<Input<KeyCode>>, wing_query: Query<&Wing>) {
-    // Once wings are out, they've gotta close before you can spawn new ones!
-    if wing_query.iter().count() > 0 {
+fn handle_direction_pressed(
+    mut commands: Commands,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut wing_query: Query<(&mut Transform, &mut Wing)>,
+    mut timer_query: Query<&mut WingTimer>,
+    asset_server: Res<AssetServer>,
+) {
+    // Can't change direction if wings are moving
+    for (transform, wing) in &wing_query {
+        if wing.is_moving {
+            return;
+        }
+    }
+
+    let mut rotation = 0.;
+    if keyboard_input.just_pressed(KeyCode::Up) || keyboard_input.just_pressed(KeyCode::W) {
+        rotation = 0.;
+    }
+    else if keyboard_input.just_pressed(KeyCode::Down) || keyboard_input.just_pressed(KeyCode::S) {
+        rotation = PI;
+    }
+    else if keyboard_input.just_pressed(KeyCode::Left) || keyboard_input.just_pressed(KeyCode::A) {
+        rotation = PI / 2.;
+    }
+    else if keyboard_input.just_pressed(KeyCode::Right) || keyboard_input.just_pressed(KeyCode::D) {
+        rotation = PI * 3. / 2.;
+    }
+    else {
         return;
     }
 
-    if keyboard_input.just_pressed(KeyCode::Up) || keyboard_input.just_pressed(KeyCode::W) {
-        commands.spawn(WingBundle::new(
-            WingPosition::Left,
-            WingDirection::Clockwise,
-        ));
-        commands.spawn(WingBundle::new(
-            WingPosition::Right,
-            WingDirection::CounterClockwise,
-        ));
-    }
-    if keyboard_input.just_pressed(KeyCode::Down) || keyboard_input.just_pressed(KeyCode::S) {
-        commands.spawn(WingBundle::new(
-            WingPosition::Left,
-            WingDirection::CounterClockwise,
-        ));
-        commands.spawn(WingBundle::new(
-            WingPosition::Right,
-            WingDirection::Clockwise,
-        ));
-    }
-    if keyboard_input.just_pressed(KeyCode::Left) || keyboard_input.just_pressed(KeyCode::A) {
-        commands.spawn(WingBundle::new(
-            WingPosition::Top,
-            WingDirection::CounterClockwise,
-        ));
-        commands.spawn(WingBundle::new(
-            WingPosition::Bottom,
-            WingDirection::Clockwise,
-        ));
-    }
-    if keyboard_input.just_pressed(KeyCode::Right) || keyboard_input.just_pressed(KeyCode::D) {
-        commands.spawn(WingBundle::new(WingPosition::Top, WingDirection::Clockwise));
-        commands.spawn(WingBundle::new(
-            WingPosition::Bottom,
-            WingDirection::CounterClockwise,
-        ));
+    timer_query.single_mut().reset();
+    for (mut transform, mut wing) in &mut wing_query {
+        wing.is_moving = true;
+        wing.base_z_rotation = rotation;
+        transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0);
+        transform.rotate_z(rotation);
     }
 }
 
 fn update_wings(
+    time: Res<Time>,
+    mut timer_query: Query<&mut WingTimer>,
     mut commands: Commands,
-    mut query: Query<(Entity, &mut Transform, &Wing)>,
+    mut query: Query<(Entity, &mut Transform, &mut Wing)>,
     mut wave_end_events: EventWriter<WaveEndEvent>,
 ) {
-    for (entity, mut transform, wing) in &mut query {
+    let mut wing_timer = timer_query.single_mut();
+    let done = wing_timer.tick(time.delta()).just_finished();
+
+    for (entity, mut transform, mut wing) in &mut query {
+        if !wing.is_moving {
+            continue;
+        }
+
         if wing.direction == WingDirection::Clockwise {
             transform.rotate_z(-WING_SPEED * TIME_STEP);
         } else {
             transform.rotate_z(WING_SPEED * TIME_STEP);
         }
 
-        if transform.rotation.to_euler(EulerRot::XYZ).2.abs() >= PI / 2. {
-            commands.entity(entity).despawn();
+        if done {
+            wing.is_moving = false;
+            transform.rotation = Quat::from_xyzw(0.0, 0.0, 0.0, 1.0);
             wave_end_events.send_default();
         }
     }
@@ -269,6 +287,9 @@ fn check_wing_collisions(
     mut points: ResMut<Points>,
 ) {
     for (wing_transform, wing) in &wings_query {
+        if !wing.is_moving {
+            continue;
+        }
         let angle = wing_transform.rotation.to_euler(EulerRot::XYZ).2;
         let wing_angle = wing.position.adjusted_angle(angle);
 
@@ -302,7 +323,6 @@ fn handle_wave_end(
         }
         points.total = points.total + points.this_wave - num_remaining_objs;
         points.this_wave = 0;
-        println!("{}", points.total);
 
         spawn_objects(commands);
     }
