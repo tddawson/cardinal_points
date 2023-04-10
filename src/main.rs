@@ -1,23 +1,16 @@
-use std::{f32::consts::PI};
+use std::f32::consts::PI;
 
 use ::bevy::prelude::*;
-use bevy::{
-    sprite::{Anchor},
-};
+use bevy::sprite::Anchor;
 use rand::Rng;
 
 const TIME_STEP: f32 = 1. / 60.;
 
-const NUM_OBJECTS: isize = 20;
-const OBJ_COLOR: Color = Color::rgb(217. / 255., 32. / 255., 77. / 255.);
-const OBJ_SIZE: Vec3 = Vec3::new(40., 40., 0.);
+const NUM_EGGS: isize = 25;
 
-const BG_COLOR: Color = Color::rgb(0., 0., 0.);
+const BG_COLOR: Color = Color::rgb(0., 0.4, 0.1);
 
-const X_MIN: f32 = -300.;
-const X_MAX: f32 = 300.;
-const Y_MIN: f32 = -300.;
-const Y_MAX: f32 = 300.;
+const RADIUS: f32 = 300.;
 
 const WING_SPEED: f32 = 2.;
 
@@ -25,37 +18,50 @@ fn main() {
     App::new()
         .insert_resource(ClearColor(BG_COLOR))
         .insert_resource(FixedTime::new_from_secs(TIME_STEP))
+        .insert_resource(GameState { state: State::TimeUp })
         .insert_resource(Points {
             total: 0,
             this_wave: 0,
         })
         .add_plugins(DefaultPlugins)
         .add_startup_system(setup)
-        .add_startup_system(spawn_objects)
         .add_event::<WaveEndEvent>()
         .add_systems(
             (
                 handle_direction_pressed,
+                handle_reset,
                 update_wings,
                 check_wing_collisions.after(update_wings),
                 handle_wave_end.after(check_wing_collisions),
             )
                 .in_schedule(CoreSchedule::FixedUpdate),
         )
+        .add_system(update_timer)
         .add_system(update_scoreboard)
+        .add_system(update_time_display)
+        .add_system(bevy::window::close_on_esc)
         .run()
 }
 
-fn setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-) {
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>, mut state: ResMut<GameState>) {
     commands.spawn(Camera2dBundle::default());
 
     commands.spawn(SpriteBundle {
-        texture: asset_server.load("images/cardinal.png"),
+        texture: asset_server.load("images/nest.png"),
         transform: Transform {
-            scale: Vec3::new(0.15, 0.15, 1.),
+            scale: Vec3::new(0.6, 0.6, 1.),
+            translation: Vec3::new(0., 0., 0.),
+            ..default()
+        },
+        ..default()
+    });
+
+    let bird_tex = asset_server.load("images/cardinal.png");
+    commands.spawn(SpriteBundle {
+        texture: bird_tex,
+        transform: Transform {
+            scale: Vec3::new(0.15, 0.15, 50.),
+            translation: Vec3::new(0., 0., 50.),
             ..default()
         },
         ..default()
@@ -73,32 +79,56 @@ fn setup(
         tex.clone(),
     ));
 
-    
-
-    commands.spawn(
+    commands.spawn((
         TextBundle::from_sections([TextSection::new(
             "0",
             TextStyle {
                 font: asset_server.load("fonts/Roboto-Black.ttf"),
                 font_size: 60.,
-                color: Color::rgb(0.5, 0., 0.),
+                color: Color::rgb(1., 1., 1.),
             },
         )])
         .with_style(Style {
             position_type: PositionType::Absolute,
             position: UiRect {
-                top: Val::Percent(0.5),
-                left: Val::Percent(0.5),
+                top: Val::Px(20.),
+                left: Val::Px(200.),
                 ..default()
             },
             ..default()
         }),
-    );
+        ScoreDisplay,
+    ));
 
-    commands.spawn(WingTimer(Timer::from_seconds(
-        0.75,
-        TimerMode::Once,
-    )));
+    commands.spawn((
+        TextBundle::from_sections([TextSection::new(
+            "30",
+            TextStyle {
+                font: asset_server.load("fonts/Roboto-Black.ttf"),
+                font_size: 60.,
+                color: Color::rgb(1., 1., 1.),
+            },
+        )])
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            position: UiRect {
+                top: Val::Px(20.),
+                right: Val::Px(200.),
+                ..default()
+            },
+            ..default()
+        }),
+        TimeDisplay,
+    ));
+    commands.spawn(GameTimer(Timer::from_seconds(15., TimerMode::Once)));
+    
+
+    commands.spawn(WingTimer(Timer::from_seconds(0.75, TimerMode::Once)));
+
+    let egg_tex = asset_server.load("images/egg.png");
+    spawn_eggs(commands, egg_tex);
+
+    state.state = State::Playing;
 }
 
 #[derive(Resource)]
@@ -107,14 +137,33 @@ struct Points {
     this_wave: isize,
 }
 
+#[derive(Resource,  Deref, DerefMut)]
+struct GameState {
+    state: State,
+}
+
+#[derive(PartialEq)]
+enum State {
+    Playing, TimeUp
+}
+
 #[derive(Default)]
 struct WaveEndEvent;
 
 #[derive(Component)]
-struct Obj;
+struct Egg;
+
+#[derive(Component)]
+struct ScoreDisplay;
+
+#[derive(Component)]
+struct TimeDisplay;
 
 #[derive(Component, Deref, DerefMut)]
 struct WingTimer(Timer);
+
+#[derive(Component, Deref, DerefMut)]
+struct GameTimer(Timer);
 
 #[derive(Component)]
 struct Wing {
@@ -137,13 +186,17 @@ impl WingBundle {
                 sprite: Sprite {
                     color: Color::rgb(1., 1., 1.),
                     anchor: position.anchor(),
-                    flip_x: if position == WingPosition::Left { true } else { false },
+                    flip_x: if position == WingPosition::Left {
+                        true
+                    } else {
+                        false
+                    },
                     ..default()
                 },
                 texture: texture,
                 transform: Transform {
-                    translation: Vec3::new(0., 0., 0.),
-                    scale: Vec3::new(0.25, 0.25, 0.),
+                    translation: Vec3::new(0., 0., 49.),
+                    scale: Vec3::new(0.2, 0.15, 0.),
                     ..default()
                 },
                 ..default()
@@ -189,56 +242,56 @@ impl WingPosition {
     }
 }
 
-fn spawn_objects(mut commands: Commands) {
-    for _ in 0..NUM_OBJECTS {
-        let x = rand::thread_rng().gen_range(X_MIN..X_MAX);
-        let y = rand::thread_rng().gen_range(Y_MIN..Y_MAX);
+fn spawn_eggs(mut commands: Commands, texture: Handle<Image>) {
+    for i in 0..NUM_EGGS {
+        let cardinal_padding = 100.;
+        let r = rand::thread_rng().gen_range(cardinal_padding..RADIUS);
+        let theta = rand::thread_rng().gen_range(-PI..PI);
         commands.spawn((
             SpriteBundle {
-                sprite: Sprite {
-                    color: OBJ_COLOR,
-                    ..default()
-                },
+                texture: texture.clone(),
                 transform: Transform {
-                    translation: Vec3::new(x, y, 0.),
-                    scale: OBJ_SIZE,
+                    translation: Vec3::new(theta.cos() * r, theta.sin() * r, (2 + i) as f32),
+                    scale: Vec3::new(0.1, 0.1, 1.),
                     ..default()
                 },
                 ..default()
             },
-            Obj,
+            Egg,
         ));
     }
 }
 
 fn handle_direction_pressed(
-    mut commands: Commands,
     keyboard_input: Res<Input<KeyCode>>,
     mut wing_query: Query<(&mut Transform, &mut Wing)>,
     mut timer_query: Query<&mut WingTimer>,
-    asset_server: Res<AssetServer>,
+    game_state: Res<GameState>,
 ) {
+    if game_state.state == State::TimeUp {
+        return;
+    }
+
     // Can't change direction if wings are moving
-    for (transform, wing) in &wing_query {
+    for (_, wing) in &wing_query {
         if wing.is_moving {
             return;
         }
     }
 
-    let mut rotation = 0.;
+    let rotation;
     if keyboard_input.just_pressed(KeyCode::Up) || keyboard_input.just_pressed(KeyCode::W) {
         rotation = 0.;
-    }
-    else if keyboard_input.just_pressed(KeyCode::Down) || keyboard_input.just_pressed(KeyCode::S) {
+    } else if keyboard_input.just_pressed(KeyCode::Down) || keyboard_input.just_pressed(KeyCode::S)
+    {
         rotation = PI;
-    }
-    else if keyboard_input.just_pressed(KeyCode::Left) || keyboard_input.just_pressed(KeyCode::A) {
+    } else if keyboard_input.just_pressed(KeyCode::Left) || keyboard_input.just_pressed(KeyCode::A)
+    {
         rotation = PI / 2.;
-    }
-    else if keyboard_input.just_pressed(KeyCode::Right) || keyboard_input.just_pressed(KeyCode::D) {
+    } else if keyboard_input.just_pressed(KeyCode::Right) || keyboard_input.just_pressed(KeyCode::D)
+    {
         rotation = PI * 3. / 2.;
-    }
-    else {
+    } else {
         return;
     }
 
@@ -251,17 +304,31 @@ fn handle_direction_pressed(
     }
 }
 
+fn handle_reset(
+    keyboard_input: Res<Input<KeyCode>>,
+    mut timer_query: Query<&mut GameTimer>,
+    mut game_state: ResMut<GameState>,
+    mut points: ResMut<Points>,
+) {
+    if !keyboard_input.just_pressed(KeyCode::Space) {
+        return;
+    }
+    timer_query.single_mut().reset();
+    game_state.state = State::Playing;
+    points.this_wave = 0;
+    points.total = 0;
+}
+
 fn update_wings(
     time: Res<Time>,
     mut timer_query: Query<&mut WingTimer>,
-    mut commands: Commands,
-    mut query: Query<(Entity, &mut Transform, &mut Wing)>,
+    mut query: Query<(&mut Transform, &mut Wing)>,
     mut wave_end_events: EventWriter<WaveEndEvent>,
 ) {
     let mut wing_timer = timer_query.single_mut();
     let done = wing_timer.tick(time.delta()).just_finished();
 
-    for (entity, mut transform, mut wing) in &mut query {
+    for (mut transform, mut wing) in &mut query {
         if !wing.is_moving {
             continue;
         }
@@ -283,7 +350,7 @@ fn update_wings(
 fn check_wing_collisions(
     mut commands: Commands,
     wings_query: Query<(&Transform, &Wing)>,
-    objs_query: Query<(Entity, &Transform), With<Obj>>,
+    objs_query: Query<(Entity, &Transform), With<Egg>>,
     mut points: ResMut<Points>,
 ) {
     for (wing_transform, wing) in &wings_query {
@@ -311,8 +378,10 @@ fn check_wing_collisions(
 fn handle_wave_end(
     mut commands: Commands,
     mut wave_end_events: EventReader<WaveEndEvent>,
-    objs_query: Query<Entity, With<Obj>>,
+    objs_query: Query<Entity, With<Egg>>,
     mut points: ResMut<Points>,
+    asset_server: Res<AssetServer>,
+    game_state: Res<GameState>
 ) {
     if !wave_end_events.is_empty() {
         wave_end_events.clear();
@@ -324,11 +393,32 @@ fn handle_wave_end(
         points.total = points.total + points.this_wave - num_remaining_objs;
         points.this_wave = 0;
 
-        spawn_objects(commands);
+        let tex = asset_server.load("images/egg.png");
+
+        if game_state.state != State::TimeUp {
+            spawn_eggs(commands, tex);
+        }
     }
 }
 
-fn update_scoreboard(points: Res<Points>, mut query: Query<&mut Text>) {
+fn update_scoreboard(points: Res<Points>, mut query: Query<&mut Text, With<ScoreDisplay>>) {
     let mut text = query.single_mut();
     text.sections[0].value = points.total.to_string();
+}
+
+fn update_timer(time: Res<Time>, mut timer_query: Query<&mut GameTimer>, mut game_state: ResMut<GameState>) {
+    let mut timer = timer_query.single_mut();
+    if timer.tick(time.delta()).just_finished() {
+        game_state.state = State::TimeUp;
+    }
+}
+
+fn update_time_display(
+    mut timer_query: Query<&mut GameTimer>,
+    mut query: Query<&mut Text, With<TimeDisplay>>,
+) {
+    let timer = timer_query.single_mut();
+
+    let mut text = query.single_mut();
+    text.sections[0].value = timer.remaining_secs().ceil().to_string();
 }
